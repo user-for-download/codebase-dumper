@@ -1,0 +1,11 @@
+[package]
+name = "search_tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+walkdir = "2.4"
+indicatif = "0.18.3"
+regex = "1.10"
+anyhow = "1.0"
