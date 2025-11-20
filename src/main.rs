@@ -211,9 +211,18 @@ fn main() -> Result<()> {
     current_buffer.push_str(&format!("PROJECT STRUCTURE: {:?}\n", args.path));
     current_buffer.push_str("==========================================\n");
     let mut visited_dirs = HashSet::new();
-    current_buffer.push_str(&generate_tree_view(&args.path, &args.exclude, 0, &mut visited_dirs));
-    current_buffer.push_str("\n==========================================\n\n");
 
+    // --- UPDATE THIS LINE BELOW ---
+    current_buffer.push_str(&generate_tree_view(
+        &args.path,
+        &args.exclude,
+        "".to_string(), // Initial prefix is empty
+        0,              // Initial depth is 0
+        &mut visited_dirs
+    ));
+    // ------------------------------
+
+    current_buffer.push_str("\n==========================================\n\n");
     for file_path in files_to_process {
         let content = match fs::read_to_string(&file_path) {
             Ok(c) => c,
@@ -375,12 +384,20 @@ fn write_to_disk(out_pattern: &str, ext: &str, index: usize, content: &str) -> R
 fn generate_tree_view(
     dir: &Path,
     excludes: &[String],
-    depth: usize,
+    prefix: String, // CHANGED: We pass the visual prefix string
+    depth: usize,   // We keep depth only for safety limit
     visited: &mut HashSet<PathBuf>,
 ) -> String {
-    if depth > 20 { return String::new(); }
+    // Safety limit to prevent stack overflow or massive outputs
+    if depth > 20 {
+        return String::new();
+    }
+
+    // Cycle detection
     if let Ok(canonical) = fs::canonicalize(dir) {
-        if !visited.insert(canonical) { return String::new(); }
+        if !visited.insert(canonical) {
+            return String::new();
+        }
     }
 
     let read_dir = match fs::read_dir(dir) {
@@ -388,16 +405,20 @@ fn generate_tree_view(
         Err(_) => return String::new(),
     };
 
+    // Collect and Filter
     let mut entries: Vec<_> = read_dir
         .filter_map(|e| e.ok())
         .filter(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
+            // Filter hidden files (optional, mimics standard tree)
             if name.starts_with('.') { return false; }
+            // Check user excludes
             if excludes.iter().any(|ex| name == *ex) { return false; }
             true
         })
         .collect();
 
+    // Sort: Directories first, then alphabetical
     entries.sort_by(|a, b| {
         let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -414,17 +435,35 @@ fn generate_tree_view(
     for (i, entry) in entries.into_iter().enumerate() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        let prefix = "    ".repeat(depth);
-        let marker = if i == last_index { "└── " } else { "├── " };
 
-        output.push_str(&format!("{}{}{}\n", prefix, marker, name));
+        let is_last = i == last_index;
+
+        // 1. Determine the connector for THIS item
+        let connector = if is_last { "└── " } else { "├── " };
+
+        output.push_str(&format!("{}{}{}\n", prefix, connector, name));
+
         if path.is_dir() {
-            output.push_str(&generate_tree_view(&path, excludes, depth + 1, visited));
+            // 2. Prepare the prefix for CHILDREN
+            // If this was the last item, children get empty space.
+            // If this was NOT the last item, children get a vertical bar to connect next items.
+            let child_prefix = if is_last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}│   ", prefix)
+            };
+
+            output.push_str(&generate_tree_view(
+                &path,
+                excludes,
+                child_prefix,
+                depth + 1,
+                visited
+            ));
         }
     }
     output
 }
-
 // --- TESTS ---
 #[cfg(test)]
 mod tests {
