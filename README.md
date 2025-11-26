@@ -21,15 +21,61 @@ You need [Rust installed](https://www.rust-lang.org/tools/install).
 # Build release binary
 cargo build --release
 
-# The binary will be in target/release/
-./target/release/search_tool --help
+# Initialize config file
+./codebase-dumper  init
+
+# Initialize with force overwrite
+./codebase-dumper  init --force
+
+# Initialize to custom location
+./codebase-dumper  init --output my-config.txt
+
+# Show current configuration
+./codebase-dumper  config
+
+# Show only non-default values
+./codebase-dumper  config --diff
+
+# Run with config file (auto-loads .dumperrc)
+./codebase-dumper  --type php
+
+# Run ignoring config file
+./codebase-dumper  --type php --no-config
+
+# Dry run to preview
+./codebase-dumper  --dry-run --verbose
+
 ```
 
 ## 📖 Usage
 
 ### Basic Syntax
 ```bash
-./search_tool --type <EXT> [OPTIONS]
+./codebase-dumper config
+
+📄 Config file: ".dumperrc"
+
+🔧 Current Configuration:
+─────────────────────────────────────────
+   path            = .                              (default)
+   type            = php                            ←
+   out             = dump/dump_*.txt                (default)
+   limit           = 110000                         (default)
+   clean           = true                           ←
+   progress        = true                           ←
+   verbose         = false                          (default)
+   no_tree         = false                          (default)
+   tree_depth      = 20                             (default)
+   hidden          = false                          (default)
+   show_size       = false                          (default)
+
+   Excludes (5):
+      - vendor
+      - node_modules
+      - .git
+      - storage
+      - cache
+─────────────────────────────────────────
 ```
 
 ### Arguments
@@ -58,7 +104,7 @@ cargo build --release
 Scans `site03/app`, cleans comments, chunks output, and includes specific config files from the project root.
 
 ```bash
-./search_tool \
+./codebase-dumper  \
   --path site03/app \
   --type .php \
   --clean \
@@ -72,14 +118,14 @@ Scans `site03/app`, cleans comments, chunks output, and includes specific config
 Scans the current directory for `.rs` files, outputting to `dump/`.
 
 ```bash
-./search_tool --type .rs --clean --exclude target
+./codebase-dumper  --type .rs --clean --exclude target
 ```
 
 ### 3. Python Project (Script style)
 The tool automatically detects `.py` files and switches to `#` based comment removal.
 
 ```bash
-./search_tool \
+./codebase-dumper  \
   --path ./my_script \
   --type .py \
   --clean \

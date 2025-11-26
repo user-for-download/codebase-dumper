@@ -1,0 +1,73 @@
+# ============================================================================
+# Source Dumper Configuration (.dumperrc)
+# ============================================================================
+# Place this file in your project root directory.
+# All settings here can be overridden by command-line arguments.
+# Lines starting with # are comments.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# SOURCE SETTINGS
+# ----------------------------------------------------------------------------
+
+# Source directory path to scan (default: current directory)
+# path = .
+
+# Main file extension to process (required if not specified on command line)
+# Examples: php, rs, js, ts, py, go, java, cpp
+# type = php
+
+# ----------------------------------------------------------------------------
+# OUTPUT SETTINGS
+# ----------------------------------------------------------------------------
+
+# Output path pattern
+# Placeholders:
+#   * or {index} - chunk number (1, 2, 3, ...)
+#   {type} - file extension without dot
+# out = dump/dump_*.txt
+
+# Character limit per output file (default: 110000)
+# Adjust based on your LLM's context window
+# limit = 110000
+
+# ----------------------------------------------------------------------------
+# FILTERING
+# ----------------------------------------------------------------------------
+
+# Exclude directories/files (comma-separated)
+# Supports brace expansion: src/{tests,vendor}
+exclude = target, vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage
+
+# Include specific files even if they don't match the type
+# Useful for config files, dotfiles, etc.
+# include = .env.example, docker-compose.yml, Makefile
+
+# ----------------------------------------------------------------------------
+# PROCESSING OPTIONS
+# ----------------------------------------------------------------------------
+
+# Remove comments and empty lines from source files
+# clean = false
+
+# Show progress bar during processing
+# progress = true
+
+# Show verbose output (processing details)
+# verbose = false
+
+# ----------------------------------------------------------------------------
+# TREE VIEW OPTIONS
+# ----------------------------------------------------------------------------
+
+# Skip tree view generation in output
+# no_tree = false
+
+# Maximum tree depth to display (0 = unlimited, max 20)
+# tree_depth = 20
+
+# Show file sizes in tree view
+# show_size = false
+
+# Include hidden files (starting with .)
+# hidden = false
