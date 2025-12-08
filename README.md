@@ -1,162 +1,107 @@
-# 🦀 Rust Codebase Dumper
+# Source Dumper
 
-A high-performance, CLI tool written in Rust designed to **prepare codebases for LLM context** (ChatGPT, Claude, etc.). It scans, cleans, and dumps source code into chunked text files while preserving directory structure.
+Aggregate source files into chunks for LLM context windows.
 
-## 🚀 Features
-
-*   **Smart Cleaning:** Removes comments (`//`, `/* */`, `#`) and empty lines to save tokens.
-*   **Recursive Scanning:** Blazing fast traversal using `WalkDir`.
-*   **Smart Exclusion:** `exclude` matches path components, not just substrings (e.g., excluding `test` hides the folder `test/` but keeps `latest_test.php`).
-*   **Brace Expansion:** Supports patterns like `--include src/{main,lib}.rs`.
-*   **Chunking:** Splits output into multiple files (e.g., `dump_1.txt`, `dump_2.txt`) based on a token/character limit.
-*   **Tree View:** Generates a visual directory tree at the top of the first output file.
-*   **Pattern Files:** Can read include/exclude patterns from external files (like `.gitignore`).
-*   **Safety:** Automatically wipes the output directory before starting, but includes safety checks to prevent accidental deletion of source code.
-
-## 🛠 Installation
-
-You need [Rust installed](https://www.rust-lang.org/tools/install).
+## Installation
 
 ```bash
-# Build release binary
+# Linux/macOS
+chmod +x source-dumper-*
+./source-dumper-linux-x64 --help
+```
+
+### Build from Source
+
+```bash
 cargo build --release
-
-# Initialize config file
-./codebase-dumper  init
-
-# Initialize with force overwrite
-./codebase-dumper  init --force
-
-# Initialize to custom location
-./codebase-dumper  init --output my-config.txt
-
-# Show current configuration
-./codebase-dumper  config
-
-# Show only non-default values
-./codebase-dumper  config --diff
-
-# Run with config file (auto-loads .dumperrc)
-./codebase-dumper  --type php
-
-# Run ignoring config file
-./codebase-dumper  --type php --no-config
-
-# Dry run to preview
-./codebase-dumper  --dry-run --verbose
-
 ```
 
-## 📖 Usage
+## Quick Start
 
-### Basic Syntax
 ```bash
-./codebase-dumper config
+# Initialize config
+source-dumper init
 
-📄 Config file: ".dumperrc"
+# Dump PHP files
+source-dumper --type php
 
-🔧 Current Configuration:
-─────────────────────────────────────────
-   path            = .                              (default)
-   type            = php                            ←
-   out             = dump/dump_*.txt                (default)
-   limit           = 110000                         (default)
-   clean           = true                           ←
-   progress        = true                           ←
-   verbose         = false                          (default)
-   no_tree         = false                          (default)
-   tree_depth      = 20                             (default)
-   hidden          = false                          (default)
-   show_size       = false                          (default)
+# Dump Rust files with cleaning
+source-dumper --type rs --clean --progress
 
-   Excludes (5):
-      - vendor
-      - node_modules
-      - .git
-      - storage
-      - cache
-─────────────────────────────────────────
+# Dry run
+source-dumper --type js --dry-run --verbose
 ```
 
-### Arguments
+## Usage
+
+```bash
+source-dumper [OPTIONS] --type <EXTENSION>
+```
+
+## Options
 
 | Flag | Description | Default |
-| :--- | :--- | :--- |
-| `--type` | **Required.** Main extension to filter (e.g., `.php`, `.rs`, `.py`). | N/A |
-| `--path` | Source directory to scan. | `.` (Current Dir) |
-| `--out` | Output pattern. Must include `*` for numbering. | `dump/dump_*.txt` |
-| `--clean` | Removes comments and collapses empty lines. | `false` |
-| `--limit` | Character limit per output file. | `110000` |
-| `--progress`| Shows a progress bar. | `false` |
+|------|-------------|---------|
+| `--type` | File extension to process | required |
+| `--path` | Source directory | `.` |
+| `--out` | Output pattern | `dump/dump_*.txt` |
+| `--format` | Output format (plain/markdown/json) | `plain` |
+| `--limit` | Characters per chunk | `110000` |
+| `--clean` | Remove comments/empty lines | `false` |
+| `--exclude` | Exclude paths (comma-separated) | - |
+| `--include` | Include specific files | - |
+| `--progress` | Show progress bar | `false` |
+| `--verbose` | Verbose output | `false` |
+| `--dry-run` | Preview without writing | `false` |
+| `--no-tree` | Skip tree view | `false` |
+| `--tree-depth` | Max tree depth | unlimited |
+| `--hidden` | Include hidden files | `false` |
 
-### Filtering Options
+## Config File
 
-| Flag | Description | Example |
-| :--- | :--- | :--- |
-| `--include`| Whitelist specific files or substrings. Supports brace expansion. | `--include .env,docker{file,-compose.yml}` |
-| `--exclude`| Blacklist folders or path segments. | `--exclude vendor,node_modules,.git` |
-| `--include-file`| Read include patterns from a file (one per line). | `--include-file priority_list.txt` |
-| `--exclude-file`| Read exclude patterns from a file. | `--exclude-file .ignore` |
+Create `.dumperrc` in project root:
 
-## 💡 Examples
+```ini
+type = php
+out = dump/dump_*.txt
+limit = 110000
+clean = false
+exclude = vendor, node_modules, .git, storage, cache
+include = .env.example, docker-compose.yml
+```
 
-### 1. The "LLM Context" Dump (PHP)
-Scans `site03/app`, cleans comments, chunks output, and includes specific config files from the project root.
+## Examples
 
 ```bash
-./codebase-dumper  \
-  --path site03/app \
-  --type .php \
-  --clean \
-  --out "context/php_code_*.txt" \
-  --include site03/{.env,composer.json} \
-  --exclude tests,Console \
-  --progress
+# PHP project
+source-dumper --type php --exclude vendor,storage --clean
+
+# JavaScript with specific includes
+source-dumper --type js --include package.json,tsconfig.json
+
+# Markdown output for documentation
+source-dumper --type py --format markdown --out docs/source_*.md
+
+# JSON output
+source-dumper --type rs --format json --out dump/code.json
+
+# Large project with progress
+source-dumper --type java --progress --limit 50000
 ```
 
-### 2. Rust Project (Default Defaults)
-Scans the current directory for `.rs` files, outputting to `dump/`.
+## Output
 
-```bash
-./codebase-dumper  --type .rs --clean --exclude target
+```
+dump/
+├── dump_1.txt    # First chunk
+├── dump_2.txt    # Second chunk
+└── dump_3.txt    # Third chunk
 ```
 
-### 3. Python Project (Script style)
-The tool automatically detects `.py` files and switches to `#` based comment removal.
+Each chunk contains:
+- Project tree structure
+- File contents with headers
 
-```bash
-./codebase-dumper  \
-  --path ./my_script \
-  --type .py \
-  --clean \
-  --out "output/script_*.txt"
-```
+## License
 
-## ⚠️ Safety & Validation
-
-1.  **Output Wiping:** The tool attempts to **DELETE** the folder specified in `--out` to ensure a clean dump.
-    *   *Safety Check:* It calculates absolute paths. If the Source Path is inside the Output Path (or vice versa), it will **refuse** to delete the folder to protect your code.
-2.  **Validation:** At the end of the run, it warns you if an `--include` pattern was not found (helps detect typos).
-
-## 📄 Output Format
-
-**File 1 (`dump_1.txt`) starts with:**
-```text
-PROJECT STRUCTURE: "site03/app"
-==========================================
-├── Controllers
-│   └── UserController.php
-├── Models
-│   └── User.php
-└── routes.php
-
-==========================================
-
---- FILE: "site03/app/Models/User.php" ---
-namespace App\Models;
-class User {
-    public function index() {
-        return "Clean code without comments";
-    }
-}
-```
+MIT

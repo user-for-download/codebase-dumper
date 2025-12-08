@@ -27,9 +27,15 @@
 #   {type} - file extension without dot
 # out = dump/dump_*.txt
 
+# Output format: plain, markdown, json
+# format = plain
+
 # Character limit per output file (default: 110000)
 # Adjust based on your LLM's context window
 # limit = 110000
+
+# Maximum file size to process in bytes (default: 52428800 = 50MB)
+# max_file_size = 52428800
 
 # ----------------------------------------------------------------------------
 # FILTERING
@@ -37,7 +43,7 @@
 
 # Exclude directories/files (comma-separated)
 # Supports brace expansion: src/{tests,vendor}
-exclude = target, vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage
+exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage
 
 # Include specific files even if they don't match the type
 # Useful for config files, dotfiles, etc.
@@ -56,6 +62,9 @@ exclude = target, vendor, node_modules, .git, .idea, .vscode, storage, cache, lo
 # Show verbose output (processing details)
 # verbose = false
 
+# Detect file type from shebang if extension is missing
+# detect_shebang = true
+
 # ----------------------------------------------------------------------------
 # TREE VIEW OPTIONS
 # ----------------------------------------------------------------------------
@@ -63,7 +72,7 @@ exclude = target, vendor, node_modules, .git, .idea, .vscode, storage, cache, lo
 # Skip tree view generation in output
 # no_tree = false
 
-# Maximum tree depth to display (0 = unlimited, max 20)
+# Maximum tree depth to display (empty = unlimited, max 100)
 # tree_depth = 20
 
 # Show file sizes in tree view
