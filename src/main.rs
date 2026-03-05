@@ -35,9 +35,9 @@ static SCRIPT_STYLE_REGEX: Lazy<Regex> = Lazy::new(|| {
     RegexBuilder::new(
         r#"(?P<keep>"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*')|(?P<drop>#.*)"#,
     )
-        .size_limit(REGEX_SIZE_LIMIT)
-        .build()
-        .expect("Invalid script-style regex")
+    .size_limit(REGEX_SIZE_LIMIT)
+    .build()
+    .expect("Invalid script-style regex")
 });
 
 static PHP_STYLE_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -53,9 +53,9 @@ static HTML_STYLE_REGEX: Lazy<Regex> = Lazy::new(|| {
     RegexBuilder::new(
         r#"(?P<keep>"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*')|(?P<drop><!--[\s\S]*?-->)"#,
     )
-        .size_limit(REGEX_SIZE_LIMIT)
-        .build()
-        .expect("Invalid HTML-style regex")
+    .size_limit(REGEX_SIZE_LIMIT)
+    .build()
+    .expect("Invalid HTML-style regex")
 });
 
 static SQL_STYLE_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -416,8 +416,7 @@ fn main() -> Result<()> {
     );
 
     // Collect files
-    let (files_to_process, matched_includes) =
-        collect_files(&args, target_ext.as_deref())?;
+    let (files_to_process, matched_includes) = collect_files(&args, target_ext.as_deref())?;
 
     // Report unmatched includes
     if !args.include.is_empty() {
@@ -626,10 +625,7 @@ fn collect_files(
         };
 
         let path_str = path.to_string_lossy();
-        let file_name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
 
         let mut should_process = false;
 
@@ -813,9 +809,9 @@ fn clean_content(file_path: &Path, content: &str) -> String {
             || file_name.starts_with(".git")
             || file_name.starts_with(".docker")
             || file_name.starts_with(".env") =>
-            {
-                &SCRIPT_STYLE_REGEX
-            }
+        {
+            &SCRIPT_STYLE_REGEX
+        }
         _ => &C_STYLE_REGEX,
     };
 
@@ -851,7 +847,10 @@ fn generate_output_filename(pattern: &str, ext: &str, index: usize) -> String {
         let p = Path::new(&filename);
         let parent = p.parent().unwrap_or(Path::new("."));
         let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-        let extension = p.extension().map(|e| e.to_string_lossy()).unwrap_or_default();
+        let extension = p
+            .extension()
+            .map(|e| e.to_string_lossy())
+            .unwrap_or_default();
 
         let new_name = if extension.is_empty() {
             format!("{}_{}", stem, index)
@@ -913,10 +912,7 @@ fn clean_previous_output(pattern: &str) -> Result<()> {
         _ => return Ok(()),
     };
 
-    let file_pattern = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let file_pattern = path.file_name().unwrap_or_default().to_string_lossy();
 
     // Build regex from the pattern's filename part
     let regex_str = format!(
@@ -1261,10 +1257,7 @@ fn cmd_config(args: &Args, diff_only: bool) -> Result<()> {
     );
     show(
         "type",
-        display
-            .file_type
-            .as_deref()
-            .unwrap_or("(all text files)"),
+        display.file_type.as_deref().unwrap_or("(all text files)"),
         display.file_type.is_none(),
     );
     show("out", &display.out, display.out == "dump/dump_*.txt");
@@ -1332,8 +1325,7 @@ fn log_pb(pb: Option<&ProgressBar>, msg: &str) {
 fn load_patterns_from_files(paths: &[PathBuf]) -> Result<Vec<String>> {
     let mut patterns = Vec::new();
     for path in paths {
-        let file =
-            File::open(path).context(format!("Failed to open pattern file: {:?}", path))?;
+        let file = File::open(path).context(format!("Failed to open pattern file: {:?}", path))?;
         let reader = BufReader::new(file);
         for line in reader.lines() {
             let line = line?;
@@ -1440,9 +1432,21 @@ mod tests {
 
     #[test]
     fn test_matches_include_pattern() {
-        assert!(matches_include_pattern("config.json", "/home/user/project/config.json", "config.json"));
-        assert!(matches_include_pattern("config.json", "/home/user/project/config.json", "project/config.json"));
-        assert!(!matches_include_pattern("config.json", "/home/user/project/config.json", "other.json"));
+        assert!(matches_include_pattern(
+            "config.json",
+            "/home/user/project/config.json",
+            "config.json"
+        ));
+        assert!(matches_include_pattern(
+            "config.json",
+            "/home/user/project/config.json",
+            "project/config.json"
+        ));
+        assert!(!matches_include_pattern(
+            "config.json",
+            "/home/user/project/config.json",
+            "other.json"
+        ));
     }
 
     #[test]
