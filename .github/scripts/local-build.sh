@@ -1,38 +1,75 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 BINARY_NAME="source-dumper"
+DIST_DIR="dist"
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
-echo "🔨 Building for current platform..."
+echo "🔨 Building $BINARY_NAME v$VERSION for current platform..."
 cargo build --release
 
 echo "📦 Preparing artifact..."
-mkdir -p dist
+rm -rf "$DIST_DIR"
+mkdir -p "$DIST_DIR"
 
-# Detect OS
-case "$(uname -s)" in
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+case "$OS" in
     Linux*)
-        cp target/release/$BINARY_NAME dist/$BINARY_NAME-linux-x64
-        strip dist/$BINARY_NAME-linux-x64 2>/dev/null || true
-        chmod +x dist/$BINARY_NAME-linux-x64
-        cd dist && sha256sum $BINARY_NAME-linux-x64 > $BINARY_NAME-linux-x64.sha256
+        case "$ARCH" in
+            x86_64)  SUFFIX="linux-x64" ;;
+            aarch64) SUFFIX="linux-arm64" ;;
+            *)       SUFFIX="linux-$ARCH" ;;
+        esac
+        SRC="target/release/$BINARY_NAME"
+        DST="$DIST_DIR/$BINARY_NAME-$SUFFIX"
+
+        cp "$SRC" "$DST"
+        strip "$DST" 2>/dev/null || true
+        chmod +x "$DST"
+        cd "$DIST_DIR" && sha256sum "$(basename "$DST")" > "$(basename "$DST").sha256"
         ;;
+
     Darwin*)
-        ARCH=$(uname -m)
-        if [ "$ARCH" = "arm64" ]; then
-            SUFFIX="macos-arm64"
-        else
-            SUFFIX="macos-x64"
-        fi
-        cp target/release/$BINARY_NAME dist/$BINARY_NAME-$SUFFIX
-        strip dist/$BINARY_NAME-$SUFFIX 2>/dev/null || true
-        chmod +x dist/$BINARY_NAME-$SUFFIX
-        cd dist && shasum -a 256 $BINARY_NAME-$SUFFIX > $BINARY_NAME-$SUFFIX.sha256
+        case "$ARCH" in
+            arm64)   SUFFIX="macos-arm64" ;;
+            x86_64)  SUFFIX="macos-x64" ;;
+            *)       SUFFIX="macos-$ARCH" ;;
+        esac
+        SRC="target/release/$BINARY_NAME"
+        DST="$DIST_DIR/$BINARY_NAME-$SUFFIX"
+
+        cp "$SRC" "$DST"
+        strip "$DST" 2>/dev/null || true
+        chmod +x "$DST"
+        cd "$DIST_DIR" && shasum -a 256 "$(basename "$DST")" > "$(basename "$DST").sha256"
         ;;
+
     MINGW*|CYGWIN*|MSYS*)
-        cp target/release/$BINARY_NAME.exe dist/$BINARY_NAME-windows-x64.exe
+        SUFFIX="windows-x64"
+        SRC="target/release/$BINARY_NAME.exe"
+        DST="$DIST_DIR/$BINARY_NAME-$SUFFIX.exe"
+
+        cp "$SRC" "$DST"
+
+        # SHA256 on Windows (Git Bash has sha256sum)
+        if command -v sha256sum &>/dev/null; then
+            cd "$DIST_DIR" && sha256sum "$(basename "$DST")" > "$(basename "$DST").sha256"
+        elif command -v certutil &>/dev/null; then
+            certutil -hashfile "$DST" SHA256 > "$DST.sha256"
+        fi
+        ;;
+
+    *)
+        echo "❌ Unsupported OS: $OS"
+        exit 1
         ;;
 esac
 
-echo "✅ Done!"
-ls -la dist/
+echo ""
+echo "✅ Build complete!"
+echo "   Version:  $VERSION"
+echo "   Platform: $SUFFIX"
+echo "   Output:"
+ls -lh "$DIST_DIR"/ 2>/dev/null || ls -la dist/

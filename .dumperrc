@@ -1,79 +1,43 @@
 # ============================================================================
 # Source Dumper Configuration (.dumperrc)
 # ============================================================================
-# Place this file in your project root directory.
-# All settings here can be overridden by command-line arguments.
-# Lines starting with # are comments.
-# ============================================================================
-
-# ----------------------------------------------------------------------------
-# SOURCE SETTINGS
-# ----------------------------------------------------------------------------
 
 # Source directory path to scan (default: current directory)
 # path = .
 
-# Main file extension to process (required if not specified on command line)
+# Main file extension to process (empty = all text files)
 # Examples: php, rs, js, ts, py, go, java, cpp
-# type = php
+# type =
 
-# ----------------------------------------------------------------------------
-# OUTPUT SETTINGS
-# ----------------------------------------------------------------------------
-
-# Output path pattern
-# Placeholders:
-#   * or {index} - chunk number (1, 2, 3, ...)
-#   {type} - file extension without dot
+# Output path pattern (* or {index} = chunk number, {type} = extension)
 # out = dump/dump_*.txt
 
-# Output format: plain, markdown, json
-# format = plain
+# Character limit per output file
+limit = 110000
 
-# Character limit per output file (default: 110000)
-# Adjust based on your LLM's context window
-# limit = 110000
+# Maximum file size to process in bytes (default: 50MB)
+max_file_size = 52428800
 
-# Maximum file size to process in bytes (default: 52428800 = 50MB)
-# max_file_size = 52428800
-
-# ----------------------------------------------------------------------------
-# FILTERING
-# ----------------------------------------------------------------------------
-
-# Exclude directories/files (comma-separated)
-# Supports brace expansion: src/{tests,vendor}
-exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage
+# Exclude directories/files (comma-separated, supports brace expansion)
+exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage, target
 
 # Include specific files even if they don't match the type
-# Useful for config files, dotfiles, etc.
 # include = .env.example, docker-compose.yml, Makefile
 
-# ----------------------------------------------------------------------------
-# PROCESSING OPTIONS
-# ----------------------------------------------------------------------------
-
 # Remove comments and empty lines from source files
-# clean = false
+clean = false
 
 # Show progress bar during processing
-# progress = true
+progress = true
 
-# Show verbose output (processing details)
+# Show verbose output
 # verbose = false
-
-# Detect file type from shebang if extension is missing
-# detect_shebang = true
-
-# ----------------------------------------------------------------------------
-# TREE VIEW OPTIONS
-# ----------------------------------------------------------------------------
 
 # Skip tree view generation in output
 # no_tree = false
 
-# Maximum tree depth to display (empty = unlimited, max 100)
-# tree_depth = 20
+# Maximum tree depth (empty = unlimited, max 100)
+tree_depth = 20
 
 # Show file sizes in tree view
 # show_size = false

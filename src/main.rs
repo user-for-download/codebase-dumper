@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex, RegexBuilder};
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use walkdir::{DirEntry, WalkDir};
 
@@ -14,14 +13,10 @@ use walkdir::{DirEntry, WalkDir};
 // CONSTANTS
 // ============================================================================
 
-/// Maximum file size to process (50MB)
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
-
-/// Maximum regex size limit (10MB)
 const REGEX_SIZE_LIMIT: usize = 10 * (1 << 20);
-
-/// Maximum tree depth cap for safety
 const MAX_TREE_DEPTH_CAP: usize = 100;
+const DEFAULT_LIMIT: usize = 110_000;
 
 // ============================================================================
 // LAZY STATIC REGEX PATTERNS
@@ -93,57 +88,28 @@ static BRACE_REGEX: Lazy<Regex> = Lazy::new(|| {
 const DEFAULT_CONFIG: &str = r#"# ============================================================================
 # Source Dumper Configuration (.dumperrc)
 # ============================================================================
-# Place this file in your project root directory.
-# All settings here can be overridden by command-line arguments.
-# Lines starting with # are comments.
-# ============================================================================
-
-# ----------------------------------------------------------------------------
-# SOURCE SETTINGS
-# ----------------------------------------------------------------------------
 
 # Source directory path to scan (default: current directory)
 # path = .
 
-# Main file extension to process (required if not specified on command line)
+# Main file extension to process (empty = all text files)
 # Examples: php, rs, js, ts, py, go, java, cpp
-# type = php
+# type =
 
-# ----------------------------------------------------------------------------
-# OUTPUT SETTINGS
-# ----------------------------------------------------------------------------
-
-# Output path pattern
-# Placeholders:
-#   * or {index} - chunk number (1, 2, 3, ...)
-#   {type} - file extension without dot
+# Output path pattern (* or {index} = chunk number, {type} = extension)
 # out = dump/dump_*.txt
 
-# Output format: plain, markdown, json
-# format = plain
-
-# Character limit per output file (default: 110000)
-# Adjust based on your LLM's context window
+# Character limit per output file
 # limit = 110000
 
-# Maximum file size to process in bytes (default: 52428800 = 50MB)
+# Maximum file size to process in bytes (default: 50MB)
 # max_file_size = 52428800
 
-# ----------------------------------------------------------------------------
-# FILTERING
-# ----------------------------------------------------------------------------
-
-# Exclude directories/files (comma-separated)
-# Supports brace expansion: src/{tests,vendor}
-exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage
+# Exclude directories/files (comma-separated, supports brace expansion)
+exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage, target
 
 # Include specific files even if they don't match the type
-# Useful for config files, dotfiles, etc.
 # include = .env.example, docker-compose.yml, Makefile
-
-# ----------------------------------------------------------------------------
-# PROCESSING OPTIONS
-# ----------------------------------------------------------------------------
 
 # Remove comments and empty lines from source files
 # clean = false
@@ -151,20 +117,13 @@ exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp,
 # Show progress bar during processing
 # progress = true
 
-# Show verbose output (processing details)
+# Show verbose output
 # verbose = false
-
-# Detect file type from shebang if extension is missing
-# detect_shebang = true
-
-# ----------------------------------------------------------------------------
-# TREE VIEW OPTIONS
-# ----------------------------------------------------------------------------
 
 # Skip tree view generation in output
 # no_tree = false
 
-# Maximum tree depth to display (empty = unlimited, max 100)
+# Maximum tree depth (empty = unlimited, max 100)
 # tree_depth = 20
 
 # Show file sizes in tree view
@@ -175,31 +134,6 @@ exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp,
 "#;
 
 // ============================================================================
-// OUTPUT FORMAT ENUM
-// ============================================================================
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    /// Plain text output
-    #[default]
-    Plain,
-    /// Markdown formatted output
-    Markdown,
-    /// JSON formatted output
-    Json,
-}
-
-impl std::fmt::Display for OutputFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OutputFormat::Plain => write!(f, "plain"),
-            OutputFormat::Markdown => write!(f, "markdown"),
-            OutputFormat::Json => write!(f, "json"),
-        }
-    }
-}
-
-// ============================================================================
 // CLI ARGUMENTS
 // ============================================================================
 
@@ -208,33 +142,27 @@ impl std::fmt::Display for OutputFormat {
     name = "source-dumper",
     author,
     version,
-    about = "Aggregate source files into chunks for LLM context",
-    long_about = None
+    about = "Aggregate source files into text chunks for LLM context"
 )]
 struct Args {
-    /// Subcommand (init, config, run)
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Source directory path to search
+    /// Source directory path
     #[arg(long, default_value = ".")]
     path: PathBuf,
 
-    /// Main file extension to filter (e.g., php, rs, js)
-    #[arg(long = "type", value_name = "EXTENSION")]
+    /// File extension filter (empty = all text files)
+    #[arg(long = "type", value_name = "EXT")]
     file_type: Option<String>,
 
     /// Clean content (remove comments and empty lines)
     #[arg(long)]
     clean: bool,
 
-    /// Output path pattern (e.g. "dump/dump_*.txt")
+    /// Output path pattern
     #[arg(long, default_value = "dump/dump_*.txt")]
     out: String,
-
-    /// Output format
-    #[arg(long, value_enum, default_value_t = OutputFormat::Plain)]
-    format: OutputFormat,
 
     /// Show progress bar
     #[arg(long)]
@@ -244,15 +172,15 @@ struct Args {
     #[arg(long, short)]
     verbose: bool,
 
-    /// Dry run - show what would be processed
+    /// Dry run
     #[arg(long)]
     dry_run: bool,
 
     /// Character limit per output file
-    #[arg(long, default_value_t = 110000)]
+    #[arg(long, default_value_t = DEFAULT_LIMIT)]
     limit: usize,
 
-    /// Maximum file size to process (in bytes)
+    /// Maximum file size in bytes
     #[arg(long, default_value_t = MAX_FILE_SIZE)]
     max_file_size: u64,
 
@@ -276,7 +204,7 @@ struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Maximum tree depth (empty for unlimited, max 100)
+    /// Maximum tree depth (max 100)
     #[arg(long)]
     tree_depth: Option<usize>,
 
@@ -295,14 +223,9 @@ struct Args {
     /// Ignore .dumperrc config file
     #[arg(long)]
     no_config: bool,
-
-    /// Detect file type from shebang
-    #[arg(long, default_value_t = true)]
-    detect_shebang: bool,
 }
 
 impl Args {
-    /// Get effective tree depth, capped at MAX_TREE_DEPTH_CAP
     fn effective_tree_depth(&self) -> usize {
         self.tree_depth
             .map(|d| d.min(MAX_TREE_DEPTH_CAP))
@@ -314,31 +237,35 @@ impl Args {
 enum Commands {
     /// Initialize a new .dumperrc config file
     Init {
-        /// Force overwrite existing config
         #[arg(long, short)]
         force: bool,
-
-        /// Output path for config file
         #[arg(long, default_value = ".dumperrc")]
         output: PathBuf,
     },
-
     /// Show current configuration
     Config {
-        /// Show only non-default values
         #[arg(long)]
         diff: bool,
     },
-
-    /// Run the dumper (default action)
+    /// Run the dumper (default)
     Run,
+}
+
+// ============================================================================
+// COLLECTED FILE
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct CollectedFile {
+    path: PathBuf,
+    size: u64,
 }
 
 // ============================================================================
 // STATISTICS
 // ============================================================================
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 struct TreeStats {
     directories: usize,
     files: usize,
@@ -360,11 +287,12 @@ impl TreeStats {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 struct ProcessingStats {
     files_processed: usize,
     files_skipped: usize,
     files_too_large: usize,
+    files_binary: usize,
     total_input_bytes: u64,
     total_output_bytes: u64,
     chunks_created: usize,
@@ -373,9 +301,9 @@ struct ProcessingStats {
 impl ProcessingStats {
     fn summary(&self) -> String {
         let compression = if self.total_input_bytes > 0 {
-            let ratio = (self
+            let ratio = self
                 .total_input_bytes
-                .saturating_sub(self.total_output_bytes)) as f64
+                .saturating_sub(self.total_output_bytes) as f64
                 / self.total_input_bytes as f64
                 * 100.0;
             format!(" ({:.1}% reduction)", ratio)
@@ -383,17 +311,24 @@ impl ProcessingStats {
             String::new()
         };
 
-        let large_warning = if self.files_too_large > 0 {
-            format!(" | Too large: {}", self.files_too_large)
-        } else {
+        let mut extras = Vec::new();
+        if self.files_too_large > 0 {
+            extras.push(format!("too large: {}", self.files_too_large));
+        }
+        if self.files_binary > 0 {
+            extras.push(format!("binary: {}", self.files_binary));
+        }
+        let extra_str = if extras.is_empty() {
             String::new()
+        } else {
+            format!(" ({})", extras.join(", "))
         };
 
         format!(
             "Processed: {} files | Skipped: {}{} | Input: {} | Output: {}{} | Chunks: {}",
             self.files_processed,
             self.files_skipped,
-            large_warning,
+            extra_str,
             format_size(self.total_input_bytes),
             format_size(self.total_output_bytes),
             compression,
@@ -403,51 +338,21 @@ impl ProcessingStats {
 }
 
 // ============================================================================
-// FILE INFO FOR JSON OUTPUT
-// ============================================================================
-
-#[derive(Debug, Clone)]
-struct FileEntry {
-    path: String,
-    content: String,
-    size: u64,
-}
-
-// ============================================================================
 // MAIN
 // ============================================================================
 
 fn main() -> Result<()> {
     let mut args = Args::parse();
 
-    // Handle subcommands
     match &args.command {
-        Some(Commands::Init { force, output }) => {
-            return cmd_init(*force, output);
-        }
-        Some(Commands::Config { diff }) => {
-            return cmd_config(&args, *diff);
-        }
-        Some(Commands::Run) | None => {
-            // Continue with main processing
-        }
+        Some(Commands::Init { force, output }) => return cmd_init(*force, output),
+        Some(Commands::Config { diff }) => return cmd_config(&args, *diff),
+        Some(Commands::Run) | None => {}
     }
 
-    // Load config file unless --no-config
     if !args.no_config {
         load_config_file(&mut args)?;
     }
-
-    // Validate required arguments
-    let target_ext = match &args.file_type {
-        Some(t) => t.trim_start_matches('.').to_lowercase(),
-        None => {
-            eprintln!("❌ Error: --type is required (e.g., --type php)");
-            eprintln!("   Or set 'type = php' in .dumperrc");
-            eprintln!("\n   Run 'source-dumper init' to create a config file.");
-            std::process::exit(1);
-        }
-    };
 
     // Canonicalize source path
     if let Ok(p) = fs::canonicalize(&args.path) {
@@ -462,7 +367,6 @@ fn main() -> Result<()> {
         }
         args.include.extend(patterns);
     }
-
     if !args.exclude_file.is_empty() {
         let patterns = load_patterns_from_files(&args.exclude_file)?;
         if args.verbose {
@@ -475,23 +379,28 @@ fn main() -> Result<()> {
     args.include = expand_brace_patterns(args.include);
     args.exclude = expand_brace_patterns(args.exclude);
 
+    // Normalize target extension
+    let target_ext: Option<String> = args
+        .file_type
+        .as_ref()
+        .map(|t| t.trim_start_matches('.').to_lowercase())
+        .filter(|t| !t.is_empty());
+
+    let display_type = target_ext
+        .as_ref()
+        .map(|e| format!(".{}", e))
+        .unwrap_or_else(|| "(all text files)".to_string());
+
     if args.verbose {
         println!("🔧 Configuration:");
         println!("   Source: {:?}", args.path);
-        println!("   Type: .{}", target_ext);
-        println!("   Format: {}", args.format);
+        println!("   Type: {}", display_type);
         println!("   Excludes: {:?}", args.exclude);
         println!("   Includes: {:?}", args.include);
         println!("   Limit: {} chars/file", args.limit);
         println!("   Max file size: {}", format_size(args.max_file_size));
         println!("   Clean: {}", args.clean);
         println!("   Dry Run: {}", args.dry_run);
-        println!(
-            "   Tree Depth: {}",
-            args.tree_depth
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "unlimited".to_string())
-        );
     }
 
     // Prepare output directory
@@ -499,18 +408,16 @@ fn main() -> Result<()> {
         prepare_output_directory(&args)?;
     }
 
-    let display_ext = format!(".{}", target_ext);
-
     println!(
-        "🔍 Scanning: {:?} | Type: {} | Format: {} | Includes: {}",
+        "🔍 Scanning: {:?} | Type: {} | Includes: {}",
         args.path,
-        display_ext,
-        args.format,
+        display_type,
         args.include.len()
     );
 
     // Collect files
-    let (files_to_process, matched_includes) = collect_files(&args, &target_ext)?;
+    let (files_to_process, matched_includes) =
+        collect_files(&args, target_ext.as_deref())?;
 
     // Report unmatched includes
     if !args.include.is_empty() {
@@ -519,12 +426,8 @@ fn main() -> Result<()> {
             .iter()
             .filter(|inc| !matched_includes.contains(*inc))
             .collect();
-
         if !missing.is_empty() {
-            println!(
-                "⚠️  WARNING: {} include patterns not matched:",
-                missing.len()
-            );
+            println!("⚠️  {} include patterns not matched:", missing.len());
             for m in &missing {
                 println!("   - {}", m);
             }
@@ -539,12 +442,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Dry run mode
     if args.dry_run {
-        println!("\n🔍 DRY RUN - Files that would be processed:");
-        for (i, file) in files_to_process.iter().enumerate() {
-            let size = fs::metadata(file).map(|m| m.len()).unwrap_or(0);
-            let size_warning = if size > args.max_file_size {
+        println!("\n🔍 DRY RUN — files that would be processed:");
+        for (i, cf) in files_to_process.iter().enumerate() {
+            let warning = if cf.size > args.max_file_size {
                 " ⚠️ TOO LARGE"
             } else {
                 ""
@@ -552,152 +453,86 @@ fn main() -> Result<()> {
             println!(
                 "   {}. {:?} ({}){}",
                 i + 1,
-                file,
-                format_size(size),
-                size_warning
+                cf.path,
+                format_size(cf.size),
+                warning
             );
         }
         println!("\n✅ Dry run complete. No files were written.");
         return Ok(());
     }
 
-    // Process files based on format
-    match args.format {
-        OutputFormat::Json => process_files_json(&args, &files_to_process, &target_ext)?,
-        OutputFormat::Plain | OutputFormat::Markdown => {
-            process_files_text(&args, &files_to_process, &target_ext)?
-        }
-    }
+    process_files_text(&args, &files_to_process, target_ext.as_deref())?;
 
     Ok(())
 }
 
 // ============================================================================
-// TEXT FORMAT PROCESSING (Plain and Markdown)
+// TEXT PROCESSING
 // ============================================================================
 
-fn process_files_text(args: &Args, files_to_process: &[PathBuf], target_ext: &str) -> Result<()> {
+fn process_files_text(
+    args: &Args,
+    files: &[CollectedFile],
+    target_ext: Option<&str>,
+) -> Result<()> {
     let mut stats = ProcessingStats::default();
-    let total_files = files_to_process.len() as u64;
-    let pb = create_progress_bar(args, total_files)?;
+    let total = files.len() as u64;
+    let pb = create_progress_bar(args, total)?;
 
-    let mut current_buffer = String::with_capacity(args.limit);
-    let mut file_part_index = 1;
+    let mut buffer = String::with_capacity(args.limit);
+    let mut chunk_index = 1usize;
+    let ext_label = target_ext.unwrap_or("all");
 
-    // Generate tree view
+    // Tree view
     if !args.no_tree {
-        let tree_content = generate_full_tree(args)?;
-        current_buffer.push_str(&tree_content);
+        let tree = generate_full_tree(args)?;
+        buffer.push_str(&tree);
     }
 
-    // Process each file
-    for file_path in files_to_process {
-        let result = process_single_file(
-            file_path,
-            args,
-            target_ext,
-            &mut current_buffer,
-            &mut file_part_index,
-            &mut stats,
-            pb.as_ref(),
-        );
-
-        if let Err(e) = result {
+    for cf in files {
+        if cf.size > args.max_file_size {
             if args.verbose {
-                log_with_progress(pb.as_ref(), &format!("⚠️  Error processing {:?}: {}", file_path, e));
-            }
-            stats.files_skipped += 1;
-        }
-
-        if let Some(ref pb) = pb {
-            pb.inc(1);
-        }
-    }
-
-    // Write remaining buffer
-    if !current_buffer.is_empty() {
-        let bytes_written = write_to_disk(&args.out, target_ext, file_part_index, &current_buffer)?;
-        stats.total_output_bytes += bytes_written as u64;
-        stats.chunks_created = file_part_index;
-    }
-
-    if let Some(ref pb) = pb {
-        pb.finish_with_message("Done");
-    }
-
-    println!("\n✅ {}", stats.summary());
-
-    Ok(())
-}
-
-// ============================================================================
-// JSON FORMAT PROCESSING
-// ============================================================================
-
-fn process_files_json(args: &Args, files_to_process: &[PathBuf], target_ext: &str) -> Result<()> {
-    let mut stats = ProcessingStats::default();
-    let total_files = files_to_process.len() as u64;
-    let pb = create_progress_bar(args, total_files)?;
-
-    let mut all_entries: Vec<FileEntry> = Vec::new();
-    let mut current_size = 0usize;
-    let mut file_part_index = 1;
-
-    // Add tree as first entry if enabled
-    if !args.no_tree {
-        let tree_content = generate_full_tree(args)?;
-        all_entries.push(FileEntry {
-            path: "_tree_".to_string(),
-            content: tree_content.clone(),
-            size: 0,
-        });
-        current_size += tree_content.len();
-    }
-
-    for file_path in files_to_process {
-        // Check file size first
-        let metadata = match fs::metadata(file_path) {
-            Ok(m) => m,
-            Err(e) => {
-                if args.verbose {
-                    log_with_progress(
-                        pb.as_ref(),
-                        &format!("⚠️  Cannot read metadata: {:?}: {}", file_path, e),
-                    );
-                }
-                stats.files_skipped += 1;
-                if let Some(ref pb) = pb {
-                    pb.inc(1);
-                }
-                continue;
-            }
-        };
-
-        if metadata.len() > args.max_file_size {
-            if args.verbose {
-                log_with_progress(
+                log_pb(
                     pb.as_ref(),
                     &format!(
                         "⚠️  Skipping large file: {:?} ({})",
-                        file_path,
-                        format_size(metadata.len())
+                        cf.path,
+                        format_size(cf.size)
                     ),
                 );
             }
             stats.files_too_large += 1;
+            stats.files_skipped += 1;
             if let Some(ref pb) = pb {
                 pb.inc(1);
             }
             continue;
         }
 
-        let content = match fs::read_to_string(file_path) {
+        // Binary check
+        if !is_likely_text(&cf.path) {
+            if args.verbose {
+                log_pb(
+                    pb.as_ref(),
+                    &format!("⚠️  Skipping binary file: {:?}", cf.path),
+                );
+            }
+            stats.files_binary += 1;
+            stats.files_skipped += 1;
+            if let Some(ref pb) = pb {
+                pb.inc(1);
+            }
+            continue;
+        }
+
+        let content = match fs::read_to_string(&cf.path) {
             Ok(c) => c,
             Err(e) => {
                 if args.verbose {
-                    log_with_progress(
+                    log_pb(
                         pb.as_ref(),
-                        &format!("⚠️  Cannot read file: {:?}: {}", file_path, e),
+                        &format!("⚠️  Cannot read {:?}: {}", cf.path, e),
                     );
                 }
                 stats.files_skipped += 1;
@@ -710,13 +545,13 @@ fn process_files_json(args: &Args, files_to_process: &[PathBuf], target_ext: &st
 
         stats.total_input_bytes += content.len() as u64;
 
-        let processed_content = if args.clean {
-            clean_content(file_path, &content)
+        let processed = if args.clean {
+            clean_content(&cf.path, &content)
         } else {
             content
         };
 
-        if processed_content.is_empty() {
+        if processed.trim().is_empty() {
             stats.files_skipped += 1;
             if let Some(ref pb) = pb {
                 pb.inc(1);
@@ -724,31 +559,22 @@ fn process_files_json(args: &Args, files_to_process: &[PathBuf], target_ext: &st
             continue;
         }
 
-        let relative_path = file_path
-            .strip_prefix(&args.path)
-            .unwrap_or(file_path)
-            .display()
-            .to_string();
+        let relative = cf.path.strip_prefix(&args.path).unwrap_or(&cf.path);
+        let header = format!("\n--- FILE: {} ---\n", relative.display());
+        let chunk_len = header.len() + processed.len() + 1;
 
-        let entry_size = relative_path.len() + processed_content.len() + 50; // overhead for JSON
-
-        // Check if we need to write current chunk
-        if current_size + entry_size > args.limit && !all_entries.is_empty() {
-            let bytes_written =
-                write_json_to_disk(&args.out, target_ext, file_part_index, &all_entries)?;
-            stats.total_output_bytes += bytes_written as u64;
-            stats.chunks_created = file_part_index;
-            all_entries.clear();
-            current_size = 0;
-            file_part_index += 1;
+        // Flush buffer if over limit
+        if !buffer.is_empty() && (buffer.len() + chunk_len > args.limit) {
+            let written = write_chunk(&args.out, ext_label, chunk_index, &buffer)?;
+            stats.total_output_bytes += written as u64;
+            stats.chunks_created = chunk_index;
+            buffer.clear();
+            chunk_index += 1;
         }
 
-        all_entries.push(FileEntry {
-            path: relative_path,
-            content: processed_content.clone(),
-            size: metadata.len(),
-        });
-        current_size += entry_size;
+        buffer.push_str(&header);
+        buffer.push_str(&processed);
+        buffer.push('\n');
         stats.files_processed += 1;
 
         if let Some(ref pb) = pb {
@@ -756,12 +582,11 @@ fn process_files_json(args: &Args, files_to_process: &[PathBuf], target_ext: &st
         }
     }
 
-    // Write remaining entries
-    if !all_entries.is_empty() {
-        let bytes_written =
-            write_json_to_disk(&args.out, target_ext, file_part_index, &all_entries)?;
-        stats.total_output_bytes += bytes_written as u64;
-        stats.chunks_created = file_part_index;
+    // Flush remaining
+    if !buffer.is_empty() {
+        let written = write_chunk(&args.out, ext_label, chunk_index, &buffer)?;
+        stats.total_output_bytes += written as u64;
+        stats.chunks_created = chunk_index;
     }
 
     if let Some(ref pb) = pb {
@@ -773,422 +598,16 @@ fn process_files_json(args: &Args, files_to_process: &[PathBuf], target_ext: &st
     Ok(())
 }
 
-fn write_json_to_disk(
-    out_pattern: &str,
-    ext: &str,
-    index: usize,
-    entries: &[FileEntry],
-) -> Result<usize> {
-    let filename = generate_output_filename(out_pattern, ext, index);
-    let path = PathBuf::from(&filename);
-
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-
-    // Build JSON manually to avoid serde dependency
-    let mut json = String::from("{\n  \"files\": [\n");
-
-    for (i, entry) in entries.iter().enumerate() {
-        let escaped_content = escape_json_string(&entry.content);
-        let escaped_path = escape_json_string(&entry.path);
-
-        json.push_str(&format!(
-            "    {{\n      \"path\": \"{}\",\n      \"size\": {},\n      \"content\": \"{}\"\n    }}",
-            escaped_path,
-            entry.size,
-            escaped_content
-        ));
-
-        if i < entries.len() - 1 {
-            json.push(',');
-        }
-        json.push('\n');
-    }
-
-    json.push_str("  ]\n}");
-
-    let mut file =
-        File::create(&path).context(format!("Failed to create output file: {:?}", path))?;
-
-    let bytes = json.as_bytes();
-    file.write_all(bytes)?;
-
-    println!("💾 Saved: {:?} ({})", path, format_size(bytes.len() as u64));
-
-    Ok(bytes.len())
-}
-
-fn escape_json_string(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => result.push_str("\\\""),
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c if c.is_control() => {
-                result.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => result.push(c),
-        }
-    }
-    result
-}
-
 // ============================================================================
-// SUBCOMMAND: INIT
+// FILE COLLECTION
 // ============================================================================
 
-fn cmd_init(force: bool, output: &PathBuf) -> Result<()> {
-    println!("📝 Initializing configuration file...\n");
-
-    if output.exists() && !force {
-        println!("⚠️  Config file already exists: {:?}", output);
-        println!("   Use --force to overwrite.");
-        return Ok(());
-    }
-
-    let mut file =
-        File::create(output).context(format!("Failed to create config file: {:?}", output))?;
-
-    file.write_all(DEFAULT_CONFIG.as_bytes())?;
-
-    println!("✅ Created: {:?}", output);
-    println!();
-    println!("📖 Quick Start:");
-    println!("   1. Edit .dumperrc and set 'type = <your-extension>'");
-    println!("   2. Customize exclude patterns as needed");
-    println!("   3. Run: source-dumper");
-    println!();
-    println!("📚 Examples:");
-    println!("   source-dumper --type php");
-    println!("   source-dumper --type rs --clean --progress");
-    println!("   source-dumper --type js --format markdown");
-    println!("   source-dumper --dry-run --verbose");
-
-    Ok(())
-}
-
-// ============================================================================
-// SUBCOMMAND: CONFIG
-// ============================================================================
-
-fn cmd_config(args: &Args, diff_only: bool) -> Result<()> {
-    let mut display_args = args.clone();
-
-    let config_path = args
-        .config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(".dumperrc"));
-    let config_exists = config_path.exists();
-
-    if config_exists {
-        load_config_file(&mut display_args)?;
-        println!("📄 Config file: {:?}", config_path);
-    } else {
-        println!("📄 Config file: (none found)");
-    }
-
-    println!();
-    println!("🔧 Current Configuration:");
-    println!("─────────────────────────────────────────");
-
-    let show = |key: &str, value: &str, is_default: bool| {
-        if diff_only && is_default {
-            return;
-        }
-        let marker = if is_default { "(default)" } else { "←" };
-        println!("   {:15} = {:30} {}", key, value, marker);
-    };
-
-    show(
-        "path",
-        &display_args.path.to_string_lossy(),
-        display_args.path == PathBuf::from("."),
-    );
-    show(
-        "type",
-        display_args.file_type.as_deref().unwrap_or("(not set)"),
-        display_args.file_type.is_none(),
-    );
-    show(
-        "out",
-        &display_args.out,
-        display_args.out == "dump/dump_*.txt",
-    );
-    show(
-        "format",
-        &display_args.format.to_string(),
-        display_args.format == OutputFormat::Plain,
-    );
-    show(
-        "limit",
-        &display_args.limit.to_string(),
-        display_args.limit == 110000,
-    );
-    show(
-        "max_file_size",
-        &format_size(display_args.max_file_size),
-        display_args.max_file_size == MAX_FILE_SIZE,
-    );
-    show(
-        "clean",
-        &display_args.clean.to_string(),
-        !display_args.clean,
-    );
-    show(
-        "progress",
-        &display_args.progress.to_string(),
-        !display_args.progress,
-    );
-    show(
-        "verbose",
-        &display_args.verbose.to_string(),
-        !display_args.verbose,
-    );
-    show(
-        "no_tree",
-        &display_args.no_tree.to_string(),
-        !display_args.no_tree,
-    );
-    show(
-        "tree_depth",
-        &display_args
-            .tree_depth
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "unlimited".to_string()),
-        display_args.tree_depth.is_none(),
-    );
-    show(
-        "hidden",
-        &display_args.hidden.to_string(),
-        !display_args.hidden,
-    );
-    show(
-        "show_size",
-        &display_args.show_size.to_string(),
-        !display_args.show_size,
-    );
-    show(
-        "detect_shebang",
-        &display_args.detect_shebang.to_string(),
-        display_args.detect_shebang,
-    );
-
-    println!();
-
-    if !display_args.exclude.is_empty() {
-        println!("   Excludes ({}):", display_args.exclude.len());
-        for ex in &display_args.exclude {
-            println!("      - {}", ex);
-        }
-    }
-
-    if !display_args.include.is_empty() {
-        println!("   Includes ({}):", display_args.include.len());
-        for inc in &display_args.include {
-            println!("      - {}", inc);
-        }
-    }
-
-    println!("─────────────────────────────────────────");
-
-    Ok(())
-}
-
-// ============================================================================
-// CONFIG FILE LOADING
-// ============================================================================
-
-fn load_config_file(args: &mut Args) -> Result<()> {
-    let config_path = args
-        .config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(".dumperrc"));
-
-    if !config_path.exists() {
-        return Ok(());
-    }
-
-    let file = File::open(&config_path)
-        .context(format!("Failed to open config file: {:?}", config_path))?;
-    let reader = BufReader::new(file);
-
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        if let Some((key, value)) = trimmed.split_once('=') {
-            let key = key.trim();
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-
-            match key {
-                "type" => {
-                    if args.file_type.is_none() {
-                        args.file_type = Some(value.to_string());
-                    }
-                }
-                "path" => {
-                    if args.path == PathBuf::from(".") {
-                        args.path = PathBuf::from(value);
-                    }
-                }
-                "out" => {
-                    if args.out == "dump/dump_*.txt" {
-                        args.out = value.to_string();
-                    }
-                }
-                "format" => {
-                    if args.format == OutputFormat::Plain {
-                        args.format = match value.to_lowercase().as_str() {
-                            "markdown" | "md" => OutputFormat::Markdown,
-                            "json" => OutputFormat::Json,
-                            _ => OutputFormat::Plain,
-                        };
-                    }
-                }
-                "limit" => {
-                    if args.limit == 110000 {
-                        if let Ok(limit) = value.parse() {
-                            args.limit = limit;
-                        }
-                    }
-                }
-                "max_file_size" => {
-                    if args.max_file_size == MAX_FILE_SIZE {
-                        if let Ok(size) = value.parse() {
-                            args.max_file_size = size;
-                        }
-                    }
-                }
-                "exclude" => {
-                    args.exclude.extend(
-                        value
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty()),
-                    );
-                }
-                "include" => {
-                    args.include.extend(
-                        value
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty()),
-                    );
-                }
-                "clean" => {
-                    if !args.clean && (value == "true" || value == "1") {
-                        args.clean = true;
-                    }
-                }
-                "progress" => {
-                    if !args.progress && (value == "true" || value == "1") {
-                        args.progress = true;
-                    }
-                }
-                "verbose" => {
-                    if !args.verbose && (value == "true" || value == "1") {
-                        args.verbose = true;
-                    }
-                }
-                "hidden" => {
-                    if !args.hidden && (value == "true" || value == "1") {
-                        args.hidden = true;
-                    }
-                }
-                "no_tree" => {
-                    if !args.no_tree && (value == "true" || value == "1") {
-                        args.no_tree = true;
-                    }
-                }
-                "show_size" => {
-                    if !args.show_size && (value == "true" || value == "1") {
-                        args.show_size = true;
-                    }
-                }
-                "detect_shebang" => {
-                    if value == "false" || value == "0" {
-                        args.detect_shebang = false;
-                    }
-                }
-                "tree_depth" => {
-                    if args.tree_depth.is_none() {
-                        if let Ok(depth) = value.parse() {
-                            args.tree_depth = Some(depth);
-                        }
-                    }
-                }
-                _ => {} // Unknown key
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-/// Log a message, suspending the progress bar if it exists
-fn log_with_progress(pb: Option<&ProgressBar>, message: &str) {
-    if let Some(pb) = pb {
-        pb.suspend(|| println!("{}", message));
-    } else {
-        println!("{}", message);
-    }
-}
-
-/// Check if it's safe to delete the output directory
-fn is_safe_to_delete(output_dir: &Path, source_dir: &Path) -> bool {
-    let out = match fs::canonicalize(output_dir) {
-        Ok(p) => p,
-        Err(_) => return false, // Conservative: don't delete if we can't verify
-    };
-
-    let src = match fs::canonicalize(source_dir) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    // Check both directions to prevent any overlap
-    !out.starts_with(&src) && !src.starts_with(&out) && out != src
-}
-
-fn prepare_output_directory(args: &Args) -> Result<()> {
-    let out_path_obj = Path::new(&args.out);
-
-    if let Some(parent_dir) = out_path_obj.parent() {
-        if parent_dir.exists() && parent_dir != Path::new("") && parent_dir != Path::new(".") {
-            if is_safe_to_delete(parent_dir, &args.path) {
-                if args.verbose {
-                    println!("🗑️  Wiping output directory: {:?}", parent_dir);
-                }
-                fs::remove_dir_all(parent_dir).context("Failed to delete output directory")?;
-                fs::create_dir_all(parent_dir).context("Failed to recreate output directory")?;
-            } else {
-                println!("⚠️  Skipping deletion: Output folder overlaps with source.");
-            }
-        } else if !parent_dir.as_os_str().is_empty() && !parent_dir.exists() {
-            fs::create_dir_all(parent_dir)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn collect_files(args: &Args, target_ext: &str) -> Result<(Vec<PathBuf>, HashSet<String>)> {
-    let mut files_to_process = Vec::new();
-    let mut matched_includes: HashSet<String> = HashSet::new();
+fn collect_files(
+    args: &Args,
+    target_ext: Option<&str>,
+) -> Result<(Vec<CollectedFile>, HashSet<String>)> {
+    let mut files = Vec::new();
+    let mut matched_includes = HashSet::new();
 
     let walker = WalkDir::new(&args.path)
         .follow_links(true)
@@ -1197,35 +616,35 @@ fn collect_files(args: &Args, target_ext: &str) -> Result<(Vec<PathBuf>, HashSet
 
     for entry in walker.filter_map(|e| e.ok()) {
         let path = entry.path();
-
         if !path.is_file() {
             continue;
         }
 
+        let metadata = match fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
         let path_str = path.to_string_lossy();
-        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        let file_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
 
         let mut should_process = false;
 
-        // Check by extension
-        if let Some(ext) = path.extension() {
-            if ext.to_string_lossy().to_lowercase() == target_ext {
-                should_process = true;
-            }
-        }
-
-        // Check by shebang if enabled and no extension match
-        if !should_process && args.detect_shebang {
-            if let Some(detected_type) = detect_file_type_from_shebang(path) {
-                if detected_type == target_ext {
-                    should_process = true;
-                    if args.verbose {
-                        println!(
-                            "   🔍 Detected {} from shebang: {:?}",
-                            detected_type, path
-                        );
+        match target_ext {
+            Some(ext) => {
+                // Filter by extension
+                if let Some(file_ext) = path.extension() {
+                    if file_ext.to_string_lossy().to_lowercase() == ext {
+                        should_process = true;
                     }
                 }
+            }
+            None => {
+                // No type filter — accept all files (binary check later)
+                should_process = true;
             }
         }
 
@@ -1238,27 +657,32 @@ fn collect_files(args: &Args, target_ext: &str) -> Result<(Vec<PathBuf>, HashSet
         }
 
         if should_process {
-            files_to_process.push(path.to_path_buf());
-
             if args.verbose {
-                println!("   ✓ {:?}", path);
+                println!("   ✓ {:?} ({})", path, format_size(metadata.len()));
             }
+            files.push(CollectedFile {
+                path: path.to_path_buf(),
+                size: metadata.len(),
+            });
         }
     }
 
-    // External includes
+    // External includes (absolute/relative paths outside source tree)
     for inc in &args.include {
         let inc_path = Path::new(inc);
-
         if inc_path.exists() && inc_path.is_file() {
-            let abs_inc = fs::canonicalize(inc_path).unwrap_or_else(|_| inc_path.to_path_buf());
-
-            let already_exists = files_to_process
-                .iter()
-                .any(|p| fs::canonicalize(p).map(|cp| cp == abs_inc).unwrap_or(false));
-
-            if !already_exists {
-                files_to_process.push(inc_path.to_path_buf());
+            let abs = fs::canonicalize(inc_path).unwrap_or_else(|_| inc_path.to_path_buf());
+            let already = files.iter().any(|f| {
+                fs::canonicalize(&f.path)
+                    .map(|cp| cp == abs)
+                    .unwrap_or(false)
+            });
+            if !already {
+                let size = fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+                files.push(CollectedFile {
+                    path: inc_path.to_path_buf(),
+                    size,
+                });
                 matched_includes.insert(inc.clone());
                 println!("   ➕ Added external include: {:?}", inc_path);
             } else {
@@ -1267,89 +691,48 @@ fn collect_files(args: &Args, target_ext: &str) -> Result<(Vec<PathBuf>, HashSet
         }
     }
 
-    files_to_process.sort();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
 
-    Ok((files_to_process, matched_includes))
+    Ok((files, matched_includes))
 }
 
-/// Detect file type from shebang line
-fn detect_file_type_from_shebang(path: &Path) -> Option<&'static str> {
-    let file = File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
-    let mut first_line = String::new();
+// ============================================================================
+// BINARY DETECTION
+// ============================================================================
 
-    reader.read_line(&mut first_line).ok()?;
+fn is_likely_text(path: &Path) -> bool {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
 
-    if !first_line.starts_with("#!") {
-        return None;
+    let mut buf = [0u8; 8192];
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+
+    if n == 0 {
+        return true; // empty file is text
     }
 
-    let shebang = first_line.to_lowercase();
-
-    // Match common interpreters
-    if shebang.contains("python3") || shebang.contains("python") {
-        Some("py")
-    } else if shebang.contains("node") || shebang.contains("nodejs") {
-        Some("js")
-    } else if shebang.contains("ruby") {
-        Some("rb")
-    } else if shebang.contains("perl") {
-        Some("pl")
-    } else if shebang.contains("bash") || shebang.contains("/sh") {
-        Some("sh")
-    } else if shebang.contains("zsh") {
-        Some("zsh")
-    } else if shebang.contains("php") {
-        Some("php")
-    } else if shebang.contains("lua") {
-        Some("lua")
-    } else if shebang.contains("Rscript") {
-        Some("r")
-    } else {
-        None
-    }
+    // Count NUL bytes — if any in first 8K, likely binary
+    let nul_count = buf[..n].iter().filter(|&&b| b == 0).count();
+    nul_count == 0
 }
 
-fn matches_include_pattern(file_name: &Cow<str>, path_str: &Cow<str>, pattern: &str) -> bool {
-    // Exact filename match
-    if file_name.as_ref() == pattern {
-        return true;
-    }
-
-    // Path suffix match
-    if path_str.ends_with(pattern) {
-        let prefix_len = path_str.len() - pattern.len();
-        if prefix_len == 0 {
-            return true;
-        }
-
-        let prefix_char = path_str.chars().nth(prefix_len - 1);
-        if prefix_char == Some('/') || prefix_char == Some('\\') {
-            return true;
-        }
-    }
-
-    // Path contains pattern (for patterns with path separators)
-    if pattern.contains('/') || pattern.contains('\\') {
-        let normalized_pattern = pattern.replace('\\', "/");
-        let normalized_path = path_str.replace('\\', "/");
-        if normalized_path.contains(&normalized_pattern) {
-            return true;
-        }
-    }
-
-    false
-}
+// ============================================================================
+// EXCLUDE / INCLUDE MATCHING
+// ============================================================================
 
 fn is_excluded_entry(entry: &DirEntry, excludes: &[String], include_hidden: bool) -> bool {
-    let path = entry.path();
     let name = entry.file_name().to_string_lossy();
 
-    // Check hidden files
     if !include_hidden && entry.depth() > 0 && name.starts_with('.') {
         return true;
     }
 
+    let path = entry.path();
     let path_str = path.to_string_lossy();
 
     for excl in excludes {
@@ -1358,15 +741,15 @@ fn is_excluded_entry(entry: &DirEntry, excludes: &[String], include_hidden: bool
             return true;
         }
 
-        // Path contains pattern
-        if (excl.contains('/') || excl.contains('\\')) && path_str.contains(excl) {
+        // Path contains pattern (with separators)
+        if (excl.contains('/') || excl.contains('\\')) && path_str.contains(excl.as_str()) {
             return true;
         }
 
-        // Glob pattern
+        // Simple glob
         if excl.contains('*') {
             let pattern = excl.replace('.', r"\.").replace('*', ".*");
-            if let Ok(re) = Regex::new(&format!("(?i){}", pattern)) {
+            if let Ok(re) = Regex::new(&format!("(?i)^{}$", pattern)) {
                 if re.is_match(&name) {
                     return true;
                 }
@@ -1377,86 +760,210 @@ fn is_excluded_entry(entry: &DirEntry, excludes: &[String], include_hidden: bool
     false
 }
 
-fn load_patterns_from_files(paths: &[PathBuf]) -> Result<Vec<String>> {
-    let mut patterns = Vec::new();
+fn matches_include_pattern(file_name: &str, path_str: &str, pattern: &str) -> bool {
+    // Exact filename
+    if file_name == pattern {
+        return true;
+    }
 
-    for path in paths {
-        let file = File::open(path).context(format!("Failed to open pattern file: {:?}", path))?;
-        let reader = BufReader::new(file);
+    // Path suffix
+    if let Some(before) = path_str.strip_suffix(pattern) {
+        if before.is_empty() || before.ends_with('/') || before.ends_with('\\') {
+            return true;
+        }
+    }
 
-        for line in reader.lines() {
-            let line = line?;
-            let trimmed = line.trim();
+    // Normalized path contains
+    if pattern.contains('/') || pattern.contains('\\') {
+        let np = pattern.replace('\\', "/");
+        let ns = path_str.replace('\\', "/");
+        if ns.contains(&np) {
+            return true;
+        }
+    }
 
-            if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                patterns.push(trimmed.to_string());
+    false
+}
+
+// ============================================================================
+// CLEAN CONTENT
+// ============================================================================
+
+fn clean_content(file_path: &Path, content: &str) -> String {
+    let ext = file_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let file_name = file_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+
+    let regex: &Regex = match ext.as_str() {
+        "py" | "rb" | "pl" | "sh" | "bash" | "zsh" | "yaml" | "yml" | "env" | "toml" | "conf"
+        | "ini" | "r" | "jl" => &SCRIPT_STYLE_REGEX,
+        "php" | "php3" | "php4" | "php5" | "phtml" => &PHP_STYLE_REGEX,
+        "html" | "htm" | "xml" | "xhtml" | "svg" | "vue" | "svelte" => &HTML_STYLE_REGEX,
+        "sql" | "mysql" | "pgsql" | "sqlite" => &SQL_STYLE_REGEX,
+        _ if file_name == "dockerfile"
+            || file_name == "makefile"
+            || file_name == "cmakelists.txt"
+            || file_name.starts_with(".git")
+            || file_name.starts_with(".docker")
+            || file_name.starts_with(".env") =>
+            {
+                &SCRIPT_STYLE_REGEX
             }
+        _ => &C_STYLE_REGEX,
+    };
+
+    let replaced = regex.replace_all(content, |caps: &Captures| {
+        if let Some(m) = caps.name("keep") {
+            m.as_str().to_string()
+        } else {
+            String::new()
+        }
+    });
+
+    EMPTY_LINES_REGEX
+        .replace_all(&replaced, "\n")
+        .trim()
+        .to_string()
+}
+
+// ============================================================================
+// OUTPUT
+// ============================================================================
+
+fn generate_output_filename(pattern: &str, ext: &str, index: usize) -> String {
+    let ext_clean = ext.trim_start_matches('.');
+
+    let mut filename = pattern
+        .replace("{type}", ext_clean)
+        .replace("{ext}", ext_clean)
+        .replace("{index}", &index.to_string());
+
+    if filename.contains('*') {
+        filename = filename.replace('*', &index.to_string());
+    } else if !filename.contains(&index.to_string()) {
+        let p = Path::new(&filename);
+        let parent = p.parent().unwrap_or(Path::new("."));
+        let stem = p.file_stem().unwrap_or_default().to_string_lossy();
+        let extension = p.extension().map(|e| e.to_string_lossy()).unwrap_or_default();
+
+        let new_name = if extension.is_empty() {
+            format!("{}_{}", stem, index)
+        } else {
+            format!("{}_{}.{}", stem, index, extension)
+        };
+
+        filename = parent.join(new_name).to_string_lossy().to_string();
+    }
+
+    filename
+}
+
+fn write_chunk(pattern: &str, ext: &str, index: usize, content: &str) -> Result<usize> {
+    let filename = generate_output_filename(pattern, ext, index);
+    let path = PathBuf::from(&filename);
+
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)?;
         }
     }
 
-    Ok(patterns)
+    let mut file =
+        File::create(&path).context(format!("Failed to create output file: {:?}", path))?;
+
+    let bytes = content.as_bytes();
+    file.write_all(bytes)?;
+
+    println!("💾 Saved: {:?} ({})", path, format_size(bytes.len() as u64));
+
+    Ok(bytes.len())
 }
 
-/// Recursively expand brace patterns like "src/{a,b,c}" into ["src/a", "src/b", "src/c"]
-fn expand_brace_patterns(patterns: Vec<String>) -> Vec<String> {
-    let mut result: HashSet<String> = HashSet::new();
+fn prepare_output_directory(args: &Args) -> Result<()> {
+    let out_path = Path::new(&args.out);
 
-    for pattern in patterns {
-        expand_single_pattern(&pattern, &mut result);
-    }
-
-    let mut sorted: Vec<String> = result.into_iter().collect();
-    sorted.sort();
-    sorted
-}
-
-fn expand_single_pattern(pattern: &str, result: &mut HashSet<String>) {
-    if let Some(caps) = BRACE_REGEX.captures(pattern) {
-        let prefix = &caps[1];
-        let content = &caps[2];
-        let suffix = &caps[3];
-
-        for part in content.split(',') {
-            let expanded = format!("{}{}{}", prefix, part.trim(), suffix);
-            // Recursively expand in case of nested braces
-            expand_single_pattern(&expanded, result);
+    if let Some(parent) = out_path.parent() {
+        if parent.as_os_str().is_empty() || parent == Path::new(".") {
+            return Ok(());
         }
-    } else {
-        result.insert(pattern.to_string());
+
+        if parent.exists() {
+            // Only delete files matching the output pattern, never rm -rf
+            clean_previous_output(&args.out)?;
+        } else {
+            fs::create_dir_all(parent)?;
+        }
     }
+
+    Ok(())
 }
 
-fn create_progress_bar(args: &Args, total: u64) -> Result<Option<ProgressBar>> {
-    if args.progress {
-        let pb = ProgressBar::new(total);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-                )?
-                .progress_chars("#>-"),
-        );
-        Ok(Some(pb))
-    } else {
-        Ok(None)
+/// Remove only files matching the output pattern (safe, never deletes directories)
+fn clean_previous_output(pattern: &str) -> Result<()> {
+    let path = Path::new(pattern);
+    let parent = match path.parent() {
+        Some(p) if p.exists() => p,
+        _ => return Ok(()),
+    };
+
+    let file_pattern = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+
+    // Build regex from the pattern's filename part
+    let regex_str = format!(
+        "^{}$",
+        regex::escape(&file_pattern)
+            .replace(r"\*", r"\d+")
+            .replace(r"\{index\}", r"\d+")
+            .replace(r"\{type\}", r"[a-zA-Z0-9]+")
+    );
+
+    let re = match Regex::new(&regex_str) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+
+    let entries = match fs::read_dir(parent) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    let mut removed = 0;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if re.is_match(&name) && entry.path().is_file() {
+            fs::remove_file(entry.path())?;
+            removed += 1;
+        }
     }
+
+    if removed > 0 {
+        println!("🗑️  Removed {} previous output file(s)", removed);
+    }
+
+    Ok(())
 }
+
+// ============================================================================
+// TREE VIEW
+// ============================================================================
 
 fn generate_full_tree(args: &Args) -> Result<String> {
     let mut output = String::new();
     let mut stats = TreeStats::default();
-    let mut visited_dirs = HashSet::new();
+    let mut visited = HashSet::new();
 
-    match args.format {
-        OutputFormat::Markdown => {
-            output.push_str(&format!("# Project Structure: {:?}\n\n", args.path));
-            output.push_str("```\n");
-        }
-        _ => {
-            output.push_str(&format!("PROJECT STRUCTURE: {:?}\n", args.path));
-            output.push_str("==========================================\n");
-        }
-    }
+    output.push_str(&format!("PROJECT STRUCTURE: {:?}\n", args.path));
+    output.push_str("==========================================\n");
 
     let root_name = args
         .path
@@ -1465,41 +972,33 @@ fn generate_full_tree(args: &Args) -> Result<String> {
         .unwrap_or_else(|| ".".to_string());
     output.push_str(&format!("{}/\n", root_name));
 
-    let effective_depth = args.effective_tree_depth();
-
-    output.push_str(&generate_tree_view(
+    let depth = args.effective_tree_depth();
+    output.push_str(&build_tree(
         &args.path,
         &args.exclude,
         String::new(),
         0,
-        effective_depth,
+        depth,
         args.hidden,
         args.show_size,
-        &mut visited_dirs,
+        &mut visited,
         &mut stats,
     ));
 
     output.push_str(&stats.summary());
-
-    match args.format {
-        OutputFormat::Markdown => {
-            output.push_str("\n```\n\n");
-        }
-        _ => {
-            output.push_str("\n==========================================\n\n");
-        }
-    }
+    output.push_str("\n==========================================\n\n");
 
     Ok(output)
 }
 
-fn generate_tree_view(
+#[allow(clippy::too_many_arguments)]
+fn build_tree(
     dir: &Path,
     excludes: &[String],
     prefix: String,
     depth: usize,
     max_depth: usize,
-    include_hidden: bool,
+    hidden: bool,
     show_size: bool,
     visited: &mut HashSet<PathBuf>,
     stats: &mut TreeStats,
@@ -1523,24 +1022,16 @@ fn generate_tree_view(
         .filter_map(|e| e.ok())
         .filter(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-
-            if !include_hidden && name.starts_with('.') {
+            if !hidden && name.starts_with('.') {
                 return false;
             }
-
-            if excludes.iter().any(|ex| name == *ex) {
-                return false;
-            }
-
-            true
+            !excludes.contains(&name)
         })
         .collect();
 
-    // Sort: directories first, then alphabetically
     entries.sort_by(|a, b| {
         let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-
         match (a_dir, b_dir) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
@@ -1560,46 +1051,42 @@ fn generate_tree_view(
         let connector = if is_last { "└── " } else { "├── " };
 
         let size_info = if show_size && !is_dir {
-            if let Ok(meta) = fs::metadata(&path) {
-                format!(" ({})", format_size(meta.len()))
-            } else {
-                String::new()
-            }
+            fs::metadata(&path)
+                .map(|m| format!(" ({})", format_size(m.len())))
+                .unwrap_or_default()
         } else {
             String::new()
         };
 
-        let dir_indicator = if is_dir { "/" } else { "" };
+        let dir_marker = if is_dir { "/" } else { "" };
 
         output.push_str(&format!(
             "{}{}{}{}{}\n",
-            prefix, connector, name, dir_indicator, size_info
+            prefix, connector, name, dir_marker, size_info
         ));
 
         if is_dir {
             stats.directories += 1;
-
             let child_prefix = if is_last {
                 format!("{}    ", prefix)
             } else {
                 format!("{}│   ", prefix)
             };
-
-            output.push_str(&generate_tree_view(
+            output.push_str(&build_tree(
                 &path,
                 excludes,
                 child_prefix,
                 depth + 1,
                 max_depth,
-                include_hidden,
+                hidden,
                 show_size,
                 visited,
                 stats,
             ));
         } else {
             stats.files += 1;
-            if let Ok(meta) = fs::metadata(&path) {
-                stats.total_size += meta.len();
+            if let Ok(m) = fs::metadata(&path) {
+                stats.total_size += m.len();
             }
         }
     }
@@ -1607,229 +1094,296 @@ fn generate_tree_view(
     output
 }
 
-fn process_single_file(
-    file_path: &Path,
-    args: &Args,
-    target_ext: &str,
-    current_buffer: &mut String,
-    file_part_index: &mut usize,
-    stats: &mut ProcessingStats,
-    pb: Option<&ProgressBar>,
-) -> Result<()> {
-    // Check file size first
-    let metadata = fs::metadata(file_path).with_context(|| {
-        format!("Failed to read metadata for file: {:?}", file_path)
-    })?;
+// ============================================================================
+// CONFIG FILE
+// ============================================================================
 
-    if metadata.len() > args.max_file_size {
-        if args.verbose {
-            log_with_progress(
-                pb,
-                &format!(
-                    "⚠️  Skipping large file: {:?} ({})",
-                    file_path,
-                    format_size(metadata.len())
-                ),
-            );
-        }
-        stats.files_too_large += 1;
+fn load_config_file(args: &mut Args) -> Result<()> {
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".dumperrc"));
+
+    if !config_path.exists() {
         return Ok(());
     }
 
-    let content = fs::read_to_string(file_path).with_context(|| {
-        format!(
-            "Failed to read file: {:?} (size: {})",
-            file_path,
-            format_size(metadata.len())
-        )
-    })?;
+    let file = File::open(&config_path)
+        .context(format!("Failed to open config file: {:?}", config_path))?;
+    let reader = BufReader::new(file);
 
-    stats.total_input_bytes += content.len() as u64;
+    // Track which args were explicitly set on CLI
+    let cli_has_type = args.file_type.is_some();
+    let cli_has_path = args.path != Path::new(".");
+    let cli_has_out = args.out != "dump/dump_*.txt";
+    let cli_has_limit = args.limit != DEFAULT_LIMIT;
+    let cli_has_max_size = args.max_file_size != MAX_FILE_SIZE;
 
-    let processed_content = if args.clean {
-        clean_content(file_path, &content)
-    } else {
-        content
-    };
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
 
-    if processed_content.is_empty() {
-        stats.files_skipped += 1;
-        return Ok(());
-    }
-
-    stats.files_processed += 1;
-
-    let relative_path = file_path.strip_prefix(&args.path).unwrap_or(file_path);
-
-    let header = match args.format {
-        OutputFormat::Markdown => {
-            format!(
-                "\n## File: `{}`\n\n```{}\n",
-                relative_path.display(),
-                get_markdown_lang(file_path)
-            )
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
         }
-        _ => format!("\n--- FILE: {} ---\n", relative_path.display()),
-    };
 
-    let footer = match args.format {
-        OutputFormat::Markdown => "\n```\n".to_string(),
-        _ => String::new(),
-    };
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
 
-    let chunk_len = header.len() + processed_content.len() + footer.len() + 1;
-
-    // Check if we need to write current buffer to disk
-    if !current_buffer.is_empty() && (current_buffer.len() + chunk_len > args.limit) {
-        let bytes_written = write_to_disk(&args.out, target_ext, *file_part_index, current_buffer)?;
-        stats.total_output_bytes += bytes_written as u64;
-        stats.chunks_created = *file_part_index;
-        current_buffer.clear();
-        *file_part_index += 1;
+            match key {
+                "type" if !cli_has_type => {
+                    if !value.is_empty() {
+                        args.file_type = Some(value.to_string());
+                    }
+                }
+                "path" if !cli_has_path => {
+                    args.path = PathBuf::from(value);
+                }
+                "out" if !cli_has_out => {
+                    args.out = value.to_string();
+                }
+                "limit" if !cli_has_limit => {
+                    if let Ok(v) = value.parse() {
+                        args.limit = v;
+                    }
+                }
+                "max_file_size" if !cli_has_max_size => {
+                    if let Ok(v) = value.parse() {
+                        args.max_file_size = v;
+                    }
+                }
+                "exclude" => {
+                    args.exclude.extend(
+                        value
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    );
+                }
+                "include" => {
+                    args.include.extend(
+                        value
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    );
+                }
+                "clean" if !args.clean => {
+                    args.clean = value == "true" || value == "1";
+                }
+                "progress" if !args.progress => {
+                    args.progress = value == "true" || value == "1";
+                }
+                "verbose" if !args.verbose => {
+                    args.verbose = value == "true" || value == "1";
+                }
+                "hidden" if !args.hidden => {
+                    args.hidden = value == "true" || value == "1";
+                }
+                "no_tree" if !args.no_tree => {
+                    args.no_tree = value == "true" || value == "1";
+                }
+                "show_size" if !args.show_size => {
+                    args.show_size = value == "true" || value == "1";
+                }
+                "tree_depth" if args.tree_depth.is_none() => {
+                    if let Ok(d) = value.parse() {
+                        args.tree_depth = Some(d);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
-
-    current_buffer.push_str(&header);
-    current_buffer.push_str(&processed_content);
-    current_buffer.push_str(&footer);
-    current_buffer.push('\n');
 
     Ok(())
 }
 
-/// Get language identifier for Markdown code blocks
-fn get_markdown_lang(path: &Path) -> &'static str {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+// ============================================================================
+// SUBCOMMANDS
+// ============================================================================
 
-    match ext.as_str() {
-        "rs" => "rust",
-        "py" => "python",
-        "js" => "javascript",
-        "ts" => "typescript",
-        "rb" => "ruby",
-        "go" => "go",
-        "java" => "java",
-        "cpp" | "cc" | "cxx" => "cpp",
-        "c" | "h" => "c",
-        "cs" => "csharp",
-        "php" => "php",
-        "swift" => "swift",
-        "kt" | "kts" => "kotlin",
-        "scala" => "scala",
-        "sh" | "bash" | "zsh" => "bash",
-        "sql" => "sql",
-        "html" | "htm" => "html",
-        "css" => "css",
-        "scss" | "sass" => "scss",
-        "json" => "json",
-        "yaml" | "yml" => "yaml",
-        "toml" => "toml",
-        "xml" => "xml",
-        "md" | "markdown" => "markdown",
-        "vue" => "vue",
-        "svelte" => "svelte",
-        "jsx" => "jsx",
-        "tsx" => "tsx",
-        _ => "",
-    }
-}
+fn cmd_init(force: bool, output: &PathBuf) -> Result<()> {
+    println!("📝 Initializing configuration file...\n");
 
-fn clean_content(file_path: &Path, content: &str) -> String {
-    let ext = file_path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-
-    let file_name = file_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-
-    let regex: &Regex = match ext.as_str() {
-        "py" | "rb" | "pl" | "sh" | "bash" | "zsh" | "yaml" | "yml" | "env" | "toml" | "conf"
-        | "ini" | "dockerfile" | "makefile" | "cmake" | "r" | "jl" => &SCRIPT_STYLE_REGEX,
-        "php" | "php3" | "php4" | "php5" | "phtml" => &PHP_STYLE_REGEX,
-        "html" | "htm" | "xml" | "xhtml" | "svg" | "vue" | "svelte" => &HTML_STYLE_REGEX,
-        "sql" | "mysql" | "pgsql" | "sqlite" => &SQL_STYLE_REGEX,
-        _ if file_name == "dockerfile"
-            || file_name == "makefile"
-            || file_name == "cmakelists.txt"
-            || file_name == ".gitignore"
-            || file_name == ".dockerignore"
-            || file_name == ".env" =>
-            {
-                &SCRIPT_STYLE_REGEX
-            }
-        _ => &C_STYLE_REGEX,
-    };
-
-    let temp_text = regex.replace_all(content, |caps: &Captures| {
-        if let Some(m) = caps.name("keep") {
-            m.as_str().to_string()
-        } else {
-            String::new()
-        }
-    });
-
-    EMPTY_LINES_REGEX
-        .replace_all(&temp_text, "\n")
-        .trim()
-        .to_string()
-}
-
-fn generate_output_filename(out_pattern: &str, ext: &str, index: usize) -> String {
-    let ext_no_dot = ext.trim_start_matches('.');
-
-    let mut filename = out_pattern
-        .replace("{type}", ext_no_dot)
-        .replace("{ext}", ext_no_dot)
-        .replace("{index}", &index.to_string());
-
-    if filename.contains('*') {
-        filename = filename.replace('*', &index.to_string());
-    } else if !filename.contains(&index.to_string()) {
-        let path_obj = Path::new(&filename);
-        let parent = path_obj.parent().unwrap_or(Path::new("."));
-        let stem = path_obj.file_stem().unwrap_or_default().to_string_lossy();
-        let extension = path_obj
-            .extension()
-            .map(|e| e.to_string_lossy())
-            .unwrap_or_default();
-
-        let new_name = if extension.is_empty() {
-            format!("{}_{}", stem, index)
-        } else {
-            format!("{}_{}.{}", stem, index, extension)
-        };
-
-        filename = parent.join(new_name).to_string_lossy().to_string();
-    }
-
-    filename
-}
-
-fn write_to_disk(out_pattern: &str, ext: &str, index: usize, content: &str) -> Result<usize> {
-    let filename = generate_output_filename(out_pattern, ext, index);
-    let path = PathBuf::from(&filename);
-
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
+    if output.exists() && !force {
+        println!("⚠️  Config file already exists: {:?}", output);
+        println!("   Use --force to overwrite.");
+        return Ok(());
     }
 
     let mut file =
-        File::create(&path).context(format!("Failed to create output file: {:?}", path))?;
+        File::create(output).context(format!("Failed to create config file: {:?}", output))?;
+    file.write_all(DEFAULT_CONFIG.as_bytes())?;
 
-    let bytes = content.as_bytes();
-    file.write_all(bytes)?;
+    println!("✅ Created: {:?}", output);
+    println!();
+    println!("📖 Quick Start:");
+    println!("   1. Edit .dumperrc and set 'type = <ext>' (or leave empty for all files)");
+    println!("   2. Customize exclude patterns");
+    println!("   3. Run: source-dumper");
 
-    println!("💾 Saved: {:?} ({})", path, format_size(bytes.len() as u64));
+    Ok(())
+}
 
-    Ok(bytes.len())
+fn cmd_config(args: &Args, diff_only: bool) -> Result<()> {
+    let mut display = args.clone();
+
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".dumperrc"));
+
+    if config_path.exists() {
+        load_config_file(&mut display)?;
+        println!("📄 Config file: {:?}", config_path);
+    } else {
+        println!("📄 Config file: (none found)");
+    }
+
+    println!();
+    println!("🔧 Current Configuration:");
+    println!("─────────────────────────────────────────");
+
+    let show = |key: &str, value: &str, is_default: bool| {
+        if diff_only && is_default {
+            return;
+        }
+        let marker = if is_default { "(default)" } else { "←" };
+        println!("   {:15} = {:30} {}", key, value, marker);
+    };
+
+    show(
+        "path",
+        &display.path.to_string_lossy(),
+        display.path == Path::new("."),
+    );
+    show(
+        "type",
+        display
+            .file_type
+            .as_deref()
+            .unwrap_or("(all text files)"),
+        display.file_type.is_none(),
+    );
+    show("out", &display.out, display.out == "dump/dump_*.txt");
+    show(
+        "limit",
+        &display.limit.to_string(),
+        display.limit == DEFAULT_LIMIT,
+    );
+    show(
+        "max_file_size",
+        &format_size(display.max_file_size),
+        display.max_file_size == MAX_FILE_SIZE,
+    );
+    show("clean", &display.clean.to_string(), !display.clean);
+    show("progress", &display.progress.to_string(), !display.progress);
+    show("verbose", &display.verbose.to_string(), !display.verbose);
+    show("no_tree", &display.no_tree.to_string(), !display.no_tree);
+    show(
+        "tree_depth",
+        &display
+            .tree_depth
+            .map(|d| d.to_string())
+            .unwrap_or("unlimited".to_string()),
+        display.tree_depth.is_none(),
+    );
+    show("hidden", &display.hidden.to_string(), !display.hidden);
+    show(
+        "show_size",
+        &display.show_size.to_string(),
+        !display.show_size,
+    );
+
+    println!();
+
+    if !display.exclude.is_empty() {
+        println!("   Excludes ({}):", display.exclude.len());
+        for ex in &display.exclude {
+            println!("      - {}", ex);
+        }
+    }
+    if !display.include.is_empty() {
+        println!("   Includes ({}):", display.include.len());
+        for inc in &display.include {
+            println!("      - {}", inc);
+        }
+    }
+
+    println!("─────────────────────────────────────────");
+
+    Ok(())
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+fn log_pb(pb: Option<&ProgressBar>, msg: &str) {
+    if let Some(pb) = pb {
+        pb.suspend(|| println!("{}", msg));
+    } else {
+        println!("{}", msg);
+    }
+}
+
+fn load_patterns_from_files(paths: &[PathBuf]) -> Result<Vec<String>> {
+    let mut patterns = Vec::new();
+    for path in paths {
+        let file =
+            File::open(path).context(format!("Failed to open pattern file: {:?}", path))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                patterns.push(trimmed.to_string());
+            }
+        }
+    }
+    Ok(patterns)
+}
+
+fn expand_brace_patterns(patterns: Vec<String>) -> Vec<String> {
+    let mut result = HashSet::new();
+    for pattern in patterns {
+        expand_single_pattern(&pattern, &mut result);
+    }
+    let mut sorted: Vec<String> = result.into_iter().collect();
+    sorted.sort();
+    sorted
+}
+
+fn expand_single_pattern(pattern: &str, result: &mut HashSet<String>) {
+    if let Some(caps) = BRACE_REGEX.captures(pattern) {
+        let prefix = &caps[1];
+        let content = &caps[2];
+        let suffix = &caps[3];
+        for part in content.split(',') {
+            let expanded = format!("{}{}{}", prefix, part.trim(), suffix);
+            expand_single_pattern(&expanded, result);
+        }
+    } else {
+        result.insert(pattern.to_string());
+    }
+}
+
+fn create_progress_bar(args: &Args, total: u64) -> Result<Option<ProgressBar>> {
+    if args.progress {
+        let pb = ProgressBar::new(total);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                )?
+                .progress_chars("#>-"),
+        );
+        Ok(Some(pb))
+    } else {
+        Ok(None)
+    }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -1885,47 +1439,48 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_json_string() {
-        assert_eq!(escape_json_string("hello"), "hello");
-        assert_eq!(escape_json_string("hello\nworld"), "hello\\nworld");
-        assert_eq!(escape_json_string("say \"hi\""), "say \\\"hi\\\"");
-        assert_eq!(escape_json_string("path\\to\\file"), "path\\\\to\\\\file");
-    }
-
-    #[test]
     fn test_matches_include_pattern() {
-        let file_name: Cow<str> = Cow::Borrowed("config.json");
-        let path_str: Cow<str> = Cow::Borrowed("/home/user/project/config.json");
-
-        assert!(matches_include_pattern(&file_name, &path_str, "config.json"));
-        assert!(matches_include_pattern(
-            &file_name,
-            &path_str,
-            "project/config.json"
-        ));
-        assert!(!matches_include_pattern(&file_name, &path_str, "other.json"));
+        assert!(matches_include_pattern("config.json", "/home/user/project/config.json", "config.json"));
+        assert!(matches_include_pattern("config.json", "/home/user/project/config.json", "project/config.json"));
+        assert!(!matches_include_pattern("config.json", "/home/user/project/config.json", "other.json"));
     }
 
     #[test]
-    fn test_get_markdown_lang() {
-        assert_eq!(get_markdown_lang(Path::new("test.rs")), "rust");
-        assert_eq!(get_markdown_lang(Path::new("test.py")), "python");
-        assert_eq!(get_markdown_lang(Path::new("test.js")), "javascript");
-        assert_eq!(get_markdown_lang(Path::new("test.unknown")), "");
+    fn test_is_likely_text() {
+        // Create temp text file
+        let dir = std::env::temp_dir().join("dumper_test");
+        let _ = fs::create_dir_all(&dir);
+
+        let text_file = dir.join("test.txt");
+        fs::write(&text_file, "hello world\n").unwrap();
+        assert!(is_likely_text(&text_file));
+
+        let bin_file = dir.join("test.bin");
+        fs::write(&bin_file, b"\x00\x01\x02\x03").unwrap();
+        assert!(!is_likely_text(&bin_file));
+
+        let empty_file = dir.join("empty.txt");
+        fs::write(&empty_file, "").unwrap();
+        assert!(is_likely_text(&empty_file));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_clean_content_c_style() {
-        let content = r#"
-            // This is a comment
-            let x = 5; /* inline comment */
-            let y = "// not a comment";
-        "#;
-
+        let content = "// comment\nlet x = 5; /* inline */\nlet y = \"// not a comment\";";
         let cleaned = clean_content(Path::new("test.rs"), content);
-        assert!(!cleaned.contains("This is a comment"));
-        assert!(!cleaned.contains("inline comment"));
-        assert!(cleaned.contains("// not a comment")); // Inside string, preserved
+        assert!(!cleaned.contains("// comment"));
+        assert!(!cleaned.contains("/* inline */"));
+        assert!(cleaned.contains("// not a comment"));
+    }
+
+    #[test]
+    fn test_clean_content_script_style() {
+        let content = "# comment\nx = 5\ny = \"# not a comment\"";
+        let cleaned = clean_content(Path::new("test.py"), content);
+        assert!(!cleaned.contains("# comment"));
+        assert!(cleaned.contains("# not a comment"));
     }
 
     #[test]
@@ -1938,11 +1493,15 @@ mod tests {
             generate_output_filename("out/{type}_{index}.txt", "php", 2),
             "out/php_2.txt"
         );
+        assert_eq!(
+            generate_output_filename("dump/dump_*.txt", "all", 3),
+            "dump/dump_3.txt"
+        );
     }
 
     #[test]
     fn test_effective_tree_depth() {
-        let mut args = Args::parse_from(["test", "--type", "rs"]);
+        let mut args = Args::parse_from(["test"]);
 
         args.tree_depth = None;
         assert_eq!(args.effective_tree_depth(), MAX_TREE_DEPTH_CAP);
@@ -1952,5 +1511,12 @@ mod tests {
 
         args.tree_depth = Some(200);
         assert_eq!(args.effective_tree_depth(), MAX_TREE_DEPTH_CAP);
+    }
+
+    #[test]
+    fn test_no_type_means_all_files() {
+        // When file_type is None, target_ext should be None
+        let args = Args::parse_from(["test"]);
+        assert!(args.file_type.is_none());
     }
 }
