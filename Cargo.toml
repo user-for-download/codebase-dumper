@@ -1,6 +1,6 @@
 [package]
 name = "source-dumper"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Aggregate source files into chunks for LLM context"
 license = "MIT"
