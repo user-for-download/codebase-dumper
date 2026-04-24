@@ -1,6 +1,6 @@
 [package]
 name = "source-dumper"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Aggregate source files into chunks for LLM context"
 license = "MIT"
@@ -20,6 +20,3 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
-[dev-dependencies]
-tempfile = "3.23"

@@ -1,46 +1,19 @@
-# ============================================================================
 # Source Dumper Configuration (.dumperrc)
-# ============================================================================
 
-# Source directory path to scan (default: current directory)
 # path = .
-
-# Main file extension to process (empty = all text files)
-# Examples: php, rs, js, ts, py, go, java, cpp
-# type =
-
-# Output path pattern (* or {index} = chunk number, {type} = extension)
+type = rs
 # out = dump/dump_*.txt
+# limit = 110000
 
-# Character limit per output file
-limit = 110000
+# Exclude supports exact names, path fragments, and globs (*, ?)
+# Brace expansion works in config: {target,build,*.log}
+exclude = .git, target, node_modules, .idea, .vscode, *.lock, *.log
 
-# Maximum file size to process in bytes (default: 50MB)
-max_file_size = 52428800
-
-# Exclude directories/files (comma-separated, supports brace expansion)
-exclude = vendor, node_modules, .git, .idea, .vscode, storage, cache, logs, tmp, temp, dist, build, coverage, target
-
-# Include specific files even if they don't match the type
-# include = .env.example, docker-compose.yml, Makefile
-
-# Remove comments and empty lines from source files
-clean = false
-
-# Show progress bar during processing
+# include = .env.example, Makefile
+clean = true
 progress = true
-
-# Show verbose output
 # verbose = false
-
-# Skip tree view generation in output
 # no_tree = false
-
-# Maximum tree depth (empty = unlimited, max 100)
-tree_depth = 20
-
-# Show file sizes in tree view
-# show_size = false
-
-# Include hidden files (starting with .)
+# tree_depth = 20
+show_size = true
 # hidden = false
