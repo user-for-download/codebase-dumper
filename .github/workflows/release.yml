@@ -11,6 +11,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: source-dumper
+  # This resolves the deprecation warnings and opts-in to the newer Node.js runtime
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
@@ -197,18 +199,8 @@ jobs:
           rustup target add x86_64-apple-darwin
           rustup target add aarch64-apple-darwin
 
-      - name: Install Zig
-        run: |
-          wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-          tar -xf zig-linux-x86_64-0.13.0.tar.xz
-          sudo mv zig-linux-x86_64-0.13.0 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
       - name: Install cargo-zigbuild
-        run: |
-          if ! command -v cargo-zigbuild &>/dev/null; then
-            cargo install cargo-zigbuild
-          fi
+        uses: taiki-e/install-action@cargo-zigbuild
 
       - name: Build macOS x64
         run: |
@@ -259,9 +251,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: List artifacts
-        run: find artifacts -type f | sort
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
